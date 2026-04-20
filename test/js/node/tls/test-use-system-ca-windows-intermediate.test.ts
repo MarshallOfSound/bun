@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, isWindows } from "harness";
+import { bunEnv, bunExe, isCI, isWindows } from "harness";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,6 +10,11 @@ import { join } from "node:path";
 // root are in the Windows stores. Also verifies that CA-store intermediates do
 // NOT appear in tls.getCACertificates("system") — they are path-building
 // material only, not trust anchors.
+//
+// These tests install a fixture root into CurrentUser\Root via certutil. In an
+// interactive desktop session that pops a blocking security confirmation
+// dialog, so they are gated to Windows AND (CI or explicit opt-in via
+// BUN_TEST_SYSTEM_CA_CERT_STORE=1).
 
 const fixtures = join(import.meta.dir, "fixtures", "system-ca-windows");
 
@@ -19,11 +24,13 @@ const ROOT_THUMBPRINT = "61A6E82FDCE2F8770B50071A75E203BBF8E4DBF4";
 const INTERMEDIATE_THUMBPRINT = "BFDECBB563CBE2019192DB5A4A9BDAA00D6FBFEE";
 const INTERMEDIATE_CN = "Bun Test System CA Intermediate";
 
+const shouldRun = isWindows && (isCI || process.env.BUN_TEST_SYSTEM_CA_CERT_STORE === "1");
+
 function certutil(args: string[]) {
   return spawnSync("certutil", args, { encoding: "utf8" });
 }
 
-describe.skipIf(!isWindows)("--use-system-ca loads Windows intermediate (CA) store", () => {
+describe.skipIf(!shouldRun)("--use-system-ca loads Windows intermediate (CA) store", () => {
   let server: ReturnType<typeof Bun.serve>;
   let url: string;
 

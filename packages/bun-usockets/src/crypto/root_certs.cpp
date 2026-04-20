@@ -136,7 +136,8 @@ end:
 static void us_internal_init_root_certs(
     X509 *root_cert_instances[root_certs_size],
     STACK_OF(X509) *&root_extra_cert_instances,
-    STACK_OF(X509) *&root_system_cert_instances) {
+    STACK_OF(X509) *&root_system_cert_instances,
+    STACK_OF(X509) *&system_intermediate_cert_instances) {
   // This used to use an atomic_flag spinlock together with an atomic_bool.
   // The bool was set to true via atomic_exchange BEFORE the certificates were
   // actually parsed, so concurrent callers (e.g. Workers calling
@@ -168,7 +169,8 @@ static void us_internal_init_root_certs(
 #ifdef __APPLE__
       us_load_system_certificates_macos(&root_system_cert_instances);
 #elif defined(_WIN32)
-      us_load_system_certificates_windows(&root_system_cert_instances);
+      us_load_system_certificates_windows(&root_system_cert_instances,
+                                          &system_intermediate_cert_instances);
 #else
       us_load_system_certificates_linux(&root_system_cert_instances);
 #endif
@@ -185,14 +187,19 @@ struct us_default_ca_certificates {
   X509 *root_cert_instances[root_certs_size];
   STACK_OF(X509) *root_extra_cert_instances;
   STACK_OF(X509) *root_system_cert_instances;
+  // Intermediates loaded from the platform store (currently Windows "CA" store
+  // only). Used for chain building in us_get_default_ca_store() but never
+  // exposed as trust anchors or via tls.getCACertificates().
+  STACK_OF(X509) *system_intermediate_cert_instances;
 };
 
 us_default_ca_certificates* us_get_default_ca_certificates() {
-  static us_default_ca_certificates default_ca_certificates = {{NULL}, NULL, NULL};
+  static us_default_ca_certificates default_ca_certificates = {{NULL}, NULL, NULL, NULL};
 
-  us_internal_init_root_certs(default_ca_certificates.root_cert_instances, 
+  us_internal_init_root_certs(default_ca_certificates.root_cert_instances,
                               default_ca_certificates.root_extra_cert_instances,
-                              default_ca_certificates.root_system_cert_instances);
+                              default_ca_certificates.root_system_cert_instances,
+                              default_ca_certificates.system_intermediate_cert_instances);
 
   return &default_ca_certificates;
 }
@@ -248,6 +255,19 @@ extern "C" X509_STORE *us_get_default_ca_store() {
     }
   }
 
+  STACK_OF(X509) *system_intermediate_cert_instances =
+      default_ca_certificates->system_intermediate_cert_instances;
+  if (us_should_use_system_ca() && system_intermediate_cert_instances) {
+    // X509_V_FLAG_PARTIAL_CHAIN is not set, so these remain
+    // chain-building material only; verification still requires a
+    // self-signed root from the store to terminate the chain.
+    for (int i = 0; i < sk_X509_num(system_intermediate_cert_instances); i++) {
+      X509 *cert = sk_X509_value(system_intermediate_cert_instances, i);
+      X509_up_ref(cert);
+      X509_STORE_add_cert(store, cert);
+    }
+  }
+
   return store;
 }
 extern "C" const char *us_get_default_ciphers() {
@@ -269,25 +289,46 @@ struct RawCertificate {
 
 // Defined in root_certs_windows.cpp - loads raw certificate data
 extern void us_load_system_certificates_windows_raw(
-    std::vector<RawCertificate>& raw_certs);
+    std::vector<RawCertificate>& raw_roots,
+    std::vector<RawCertificate>& raw_intermediates);
 
-// Convert raw Windows certificates to OpenSSL X509 format
-void us_load_system_certificates_windows(STACK_OF(X509) **system_certs) {
-  *system_certs = sk_X509_new_null();
-  if (*system_certs == NULL) {
+static void us_raw_certs_to_x509_stack(const std::vector<RawCertificate>& raw_certs,
+                                       STACK_OF(X509) **out) {
+  *out = sk_X509_new_null();
+  if (*out == NULL) {
     return;
   }
-  
-  // Load raw certificates from Windows stores
-  std::vector<RawCertificate> raw_certs;
-  us_load_system_certificates_windows_raw(raw_certs);
-  
-  // Convert each raw certificate to X509
   for (const auto& raw_cert : raw_certs) {
     const unsigned char* data = raw_cert.data.data();
     X509* x509_cert = d2i_X509(NULL, &data, raw_cert.data.size());
     if (x509_cert != NULL) {
-      sk_X509_push(*system_certs, x509_cert);
+      sk_X509_push(*out, x509_cert);
+    }
+  }
+}
+
+// Convert raw Windows certificates to OpenSSL X509 format
+void us_load_system_certificates_windows(STACK_OF(X509) **system_certs,
+                                         STACK_OF(X509) **system_intermediates) {
+  std::vector<RawCertificate> raw_roots;
+  std::vector<RawCertificate> raw_intermediates;
+  us_load_system_certificates_windows_raw(raw_roots, raw_intermediates);
+
+  us_raw_certs_to_x509_stack(raw_roots, system_certs);
+  us_raw_certs_to_x509_stack(raw_intermediates, system_intermediates);
+
+  // Drop self-issued certificates from the intermediate set. Anything
+  // self-issued placed in the X509_STORE would be accepted as a chain
+  // terminator by OpenSSL; the Windows CA store is meant to supply
+  // path-building material only, not trust anchors.
+  if (*system_intermediates != NULL) {
+    for (int i = sk_X509_num(*system_intermediates) - 1; i >= 0; i--) {
+      X509 *cert = sk_X509_value(*system_intermediates, i);
+      if (X509_NAME_cmp(X509_get_subject_name(cert),
+                        X509_get_issuer_name(cert)) == 0) {
+        sk_X509_delete(*system_intermediates, i);
+        X509_free(cert);
+      }
     }
   }
 }

@@ -8,7 +8,8 @@ extern "C" {
 // Load system certificates for the current platform
 void us_load_system_certificates_linux(STACK_OF(X509) **system_certs);
 void us_load_system_certificates_macos(STACK_OF(X509) **system_certs);
-void us_load_system_certificates_windows(STACK_OF(X509) **system_certs);
+void us_load_system_certificates_windows(STACK_OF(X509) **system_certs,
+                                         STACK_OF(X509) **system_intermediates);
 
 // Platform-specific cleanup functions
 #ifdef __APPLE__

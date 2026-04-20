@@ -44,10 +44,22 @@ static void LoadRawCertsFromStore(std::vector<RawCertificate>& raw_certs,
 // Main function to load raw system certificates on Windows
 // Returns certificates as raw DER data to avoid OpenSSL header conflicts
 extern void us_load_system_certificates_windows_raw(
-    std::vector<RawCertificate>& raw_certs) {
-  // Load only from ROOT by default
-  LoadRawCertsFromStore(raw_certs, CERT_SYSTEM_STORE_CURRENT_USER, L"ROOT");
-  LoadRawCertsFromStore(raw_certs, CERT_SYSTEM_STORE_LOCAL_MACHINE, L"ROOT");
+    std::vector<RawCertificate>& raw_roots,
+    std::vector<RawCertificate>& raw_intermediates) {
+  // Trust anchors come from the ROOT store (Trusted Root Certification
+  // Authorities). These are exposed via tls.getCACertificates("system").
+  LoadRawCertsFromStore(raw_roots, CERT_SYSTEM_STORE_CURRENT_USER, L"ROOT");
+  LoadRawCertsFromStore(raw_roots, CERT_SYSTEM_STORE_LOCAL_MACHINE, L"ROOT");
+
+  // Intermediates come from the CA store (Intermediate Certification
+  // Authorities). Enterprise TLS-inspection proxies commonly deploy their
+  // issuing CA here via Group Policy while the proxy itself sends only the
+  // leaf in the handshake. OpenSSL needs these to build the chain up to a
+  // root; they are added to the X509_STORE for path building but are NOT
+  // treated as trust anchors (X509_V_FLAG_PARTIAL_CHAIN is not set) and are
+  // NOT returned by tls.getCACertificates("system").
+  LoadRawCertsFromStore(raw_intermediates, CERT_SYSTEM_STORE_CURRENT_USER, L"CA");
+  LoadRawCertsFromStore(raw_intermediates, CERT_SYSTEM_STORE_LOCAL_MACHINE, L"CA");
 }
 
 #endif // _WIN32
